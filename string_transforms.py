@@ -15,6 +15,10 @@ sparknlp.start()
 
 # COMMAND ----------
 
+# MAGIC %run "/All Shared/Helpers/python_tags"
+
+# COMMAND ----------
+
 class string_feature_generator():
   """ transformer that takes a Spark data frame with one or more columns of entities in raw text
       and returns the data frame with one or more ML preprocessing methods to one or more of the 
@@ -43,6 +47,7 @@ class string_feature_generator():
     self.embeddings_needed = set(self.embeddings_needed)
     
     if 'bert' in self.embeddings_needed:
+#       self.explain_document_pipeline = PretrainedPipeline("explain_document_ml",lang="en",disk_location="{}spark-nlp/explain_document_ml/".format(get_user_home_folder_path()))
       self.explain_document_pipeline = PretrainedPipeline("explain_document_ml",lang="en")
       self.bert_embeddings = BertEmbeddings.pretrained('bert_base_uncased')\
         .setInputCols(["document", "token"])\

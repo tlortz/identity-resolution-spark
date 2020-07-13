@@ -3,32 +3,24 @@
 # MAGIC - Libraries
 # MAGIC   - fuzzywuzzy (Python)
 # MAGIC   - python-Levenshtein (Python)
-# MAGIC   - spark-nlp (Python)
+# MAGIC   - spark-nlp==2.4.5 (Python)
 # MAGIC   - Lahman (R)
-# MAGIC   - JohnSnowLabs:spark-nlp:2.4.5 (Maven)
+# MAGIC   - com.johnsnowlabs.nlp:spark-nlp_2.11:2.4.5 (Maven)
 # MAGIC - spark configs
 # MAGIC   - `spark.databricks.session.share true`
 
 # COMMAND ----------
 
-# MAGIC %run ./entity_tranforms
-
-# COMMAND ----------
-
-
-
-# COMMAND ----------
-
 from pyspark.sql import functions as F
-from pyspark.ml.feature import OneHotEncoderEstimator, StringIndexer, VectorAssembler, CountVectorizerModel, Tokenizer, NGram
-from pyspark.ml.pipeline import Pipeline
-from pyspark.sql.types import IntegerType
-from pyspark.ml.linalg import Vectors, VectorUDT
 
-import sparknlp
-from sparknlp.base import *
-from sparknlp.annotator import *
-from sparknlp.pretrained import PretrainedPipeline
+# COMMAND ----------
+
+# MAGIC %run "/All Shared/Helpers/python_tags"
+
+# COMMAND ----------
+
+db_root_path = get_user_home_folder_path() + 'identities/'
+db_name = get_metastore_username_prefix() + '_identities'
 
 # COMMAND ----------
 
@@ -36,16 +28,16 @@ from sparknlp.pretrained import PretrainedPipeline
 
 # COMMAND ----------
 
-# MAGIC %sql CREATE DATABASE IF NOT EXISTS tim_lortz_databricks_com_identities; 
-# MAGIC use tim_lortz_databricks_com_identities
+spark.sql("CREATE DATABASE IF NOT EXISTS {}".format(db_name)); 
+spark.sql("use {}".format(db_name))
 
 # COMMAND ----------
 
-#%fs mkdirs dbfs:/home/tim.lortz@databricks.com/identities
+dbutils.fs.mkdirs(db_root_path)
 
 # COMMAND ----------
 
-# MAGIC %fs ls dbfs:/home/tim.lortz@databricks.com/identities
+display(dbutils.fs.ls(db_root_path))
 
 # COMMAND ----------
 
@@ -77,14 +69,14 @@ from sparknlp.pretrained import PretrainedPipeline
 # MAGIC %r
 # MAGIC library(SparkR)
 # MAGIC ## Register as a table in SparkSQL
-# MAGIC name_lookup <- dropna(select(masterDF,c("ID","playerID","firstLastCommon","firstLastGiven")))
+# MAGIC name_lookup <- dropna(SparkR::select(masterDF,c("ID","playerID","firstLastCommon","firstLastGiven")))
 # MAGIC SparkR::createOrReplaceTempView(name_lookup, "name_lookup")
 # MAGIC display(name_lookup)
 
 # COMMAND ----------
 
 # MAGIC %r
-# MAGIC master_silver <- dropna(select(masterDF,c("ID","playerID","firstLastGiven","height","weight","debutYear")))
+# MAGIC master_silver <- dropna(SparkR::select(masterDF,c("ID","playerID","firstLastGiven","height","weight","debutYear")))
 # MAGIC SparkR::createOrReplaceTempView(master_silver, "master_silver")
 
 # COMMAND ----------
@@ -131,83 +123,19 @@ from sparknlp.pretrained import PretrainedPipeline
 # MAGIC %md #### Add computationally expensive features to master and fielding tables
 # MAGIC 
 # MAGIC - BERT embeddings
-# MAGIC - Count-vectorized 2-grams
+# MAGIC - Count-vectorized bigrams
 
 # COMMAND ----------
 
-sparknlp.start()
+# MAGIC %md Use the `string_transforms` utility class included with this project
 
 # COMMAND ----------
 
-# explain_document_pipeline = PretrainedPipeline("explain_document_ml",lang="en")
+# MAGIC %run ../string_transforms
 
 # COMMAND ----------
 
-# master_silver_annotated = explain_document_pipeline.transform(spark.table("master_silver").withColumn('text',F.col('firstLastGiven')))
-
-# COMMAND ----------
-
-# display(master_silver_annotated)
-
-# COMMAND ----------
-
-# bert_embeddings = BertEmbeddings.pretrained('bert_base_uncased')\
-#           .setInputCols(["document", "token"])\
-#           .setOutputCol("embeddings")
-
-# COMMAND ----------
-
-# get word-level embeddings
-# master_silver_token_embeddings = bert_embeddings.transform(master_silver_annotated)
-
-# COMMAND ----------
-
-# roll up word-level embeddings to the "document" (i.e. the full name)
-# document_embeddings = SentenceEmbeddings() \
-#   .setInputCols(["document", "embeddings"]) \
-#   .setOutputCol("name_embeddings") \
-#   .setPoolingStrategy("AVERAGE")
-
-# to_vector = udf(lambda a: Vectors.dense(a), VectorUDT())
-
-# COMMAND ----------
-
-# master_silver_name_embeddings = document_embeddings.transform(master_silver_token_embeddings)\
-#   .withColumn('embedding',F.element_at(F.col('name_embeddings.embeddings'),1))\
-#   .withColumn('firstLastGiven_embedding',to_vector(F.col('embedding')))\
-#   .drop('text','document','sentence','token','spell','lemmas','stems','pos','embeddings','name_embeddings','embedding')\
-#   .persist()
-
-# COMMAND ----------
-
-# display(master_silver_name_embeddings)
-
-# COMMAND ----------
-
-# MAGIC %md Now create the count-vectorized 2-grams
-
-# COMMAND ----------
-
-# import string
-# letters = [l for l in list(string.ascii_lowercase)]
-# numbers=[str(d) for d in range(10)]
-# vocab = letters + numbers
-
-# import itertools
-# vocab_2gram = [e[0]+e[1]+e[2] for e in itertools.product(*[vocab, [" "], vocab])]
-# def create_ngram_counts(df,input_col):
-#   ngram = NGram(n=2, inputCol=input_col+"_chars", outputCol=input_col+"_nGrams")
-#   new_df = ngram.transform(df.withColumn(input_col+"_chars",F.split(F.lower(F.col(input_col)),"")))
-#   cv = CountVectorizerModel.from_vocabulary(vocab_2gram,inputCol=input_col+"_nGrams", outputCol=input_col+"_nGram_frequencies")
-#   return cv.transform(new_df).drop(input_col+"_nGrams",input_col+"_chars")
-
-# COMMAND ----------
-
-# master_gold = create_ngram_counts(master_silver_name_embeddings,"firstLastGiven").persist()
-
-# COMMAND ----------
-
-feature_generator = entity_feature_generator(transform_mapping={'firstLastGiven':['bert','bigram']})
+feature_generator = string_feature_generator(transform_mapping={'firstLastGiven':['bert','bigram']})
 
 # COMMAND ----------
 
@@ -238,14 +166,18 @@ display(master_gold)
 
 # COMMAND ----------
 
-master_gold.write.format("delta").save("dbfs:/home/tim.lortz@databricks.com/identities/master_gold")
+# MAGIC %sql SHOW TABLES
 
 # COMMAND ----------
 
-# MAGIC %sql 
-# MAGIC CREATE TABLE master_gold
-# MAGIC USING DELTA
-# MAGIC LOCATION "dbfs:/home/tim.lortz@databricks.com/identities/master_gold"
+master_gold.write.format("delta").mode("append").option("mergeSchema", "true").save(db_root_path+"master_gold/")
+
+# COMMAND ----------
+
+spark.sql("""
+CREATE TABLE IF NOT EXISTS master_gold
+USING DELTA
+LOCATION \'{}\'""".format(db_root_path+"master_gold/"))
 
 # COMMAND ----------
 
@@ -257,27 +189,11 @@ master_gold.write.format("delta").save("dbfs:/home/tim.lortz@databricks.com/iden
 
 # COMMAND ----------
 
-fielding_silver_annotated = explain_document_pipeline.transform(spark.table("fielding_silver").withColumn('text',F.col('firstLastCommon')))
+feature_generator_fielding = string_feature_generator(transform_mapping={'firstLastCommon':['bert','bigram']})
 
 # COMMAND ----------
 
-fielding_silver_token_embeddings = bert_embeddings.transform(fielding_silver_annotated)
-
-# COMMAND ----------
-
-fielding_silver_name_embeddings = document_embeddings.transform(fielding_silver_token_embeddings)\
-  .withColumn('embedding',F.element_at(F.col('name_embeddings.embeddings'),1))\
-  .withColumn('embedding',to_vector(F.col('embedding')))\
-  .drop('text','document','sentence','token','spell','lemmas','stems','pos','embeddings','name_embeddings')\
-  .persist()
-
-# COMMAND ----------
-
-display(fielding_silver_name_embeddings)
-
-# COMMAND ----------
-
-fielding_gold = create_ngram_counts(fielding_silver_name_embeddings,"firstLastCommon").persist()
+fielding_gold = feature_generator_fielding.fit_transform(spark.table("fielding_silver")).persist()
 
 # COMMAND ----------
 
@@ -285,14 +201,14 @@ fielding_gold.count()
 
 # COMMAND ----------
 
-# fielding_gold.write.format("delta").save("dbfs:/home/tim.lortz@databricks.com/identities/fielding_gold")
+fielding_gold.write.format("delta").mode("append").option("mergeSchema", "true").save(db_root_path+"fielding_gold/")
 
 # COMMAND ----------
 
-# MAGIC %sql 
-# MAGIC CREATE TABLE IF NOT EXISTS fielding_gold
-# MAGIC USING DELTA
-# MAGIC LOCATION "dbfs:/home/tim.lortz@databricks.com/identities/fielding_gold"
+spark.sql("""
+CREATE TABLE IF NOT EXISTS fielding_gold
+USING DELTA
+LOCATION \'{}\'""".format(db_root_path+"fielding_gold/"))
 
 # COMMAND ----------
 
@@ -332,9 +248,19 @@ fielding_raw = spark.table('fielding_raw')
 a = fielding_raw.join(master_raw.select('playerID','firstLastCommon'),on='playerID')
 
 #.drop('ID')\
+
+# make sure we don't try to match fielding records with players from the future, and try to 
+# reduce the number of pairs with extreme distances between yearID and debutYear so that 
+# the model doesn't overfit on the year gap
 pairs_raw = a.withColumnRenamed('playerID','playerID_1')\
     .crossJoin(F.broadcast(master_raw.withColumnRenamed('playerID','playerID_2').drop('firstLastCommon')))\
-    .withColumn("matched",(F.col('playerID_1')==F.col('playerID_2')))
+    .withColumn("matched",(F.col('playerID_1')==F.col('playerID_2')))\
+    .filter(F.col('yearID') >= F.col('debutYear'))\
+    .withColumn("year_proximity",(F.lit(1.0)-(F.col('yearID')-F.col('debutYear'))/F.lit(150)))\
+    .withColumn("keep",F.col("year_proximity") > F.rand(seed=1))\
+    .filter(F.col("keep"))\
+    .drop('year_proximity','keep')\
+    .persist()
 display(pairs_raw)
 
 # COMMAND ----------
@@ -353,7 +279,7 @@ unmatched_set = pairs_raw.filter(~ F.col("matched")).sample(False, balance_sampl
 # COMMAND ----------
 
 train_test_raw = matched_set.union(unmatched_set)\
-  .select('yearID','POS','ID','firstLastCommon','firstLastGiven','weight','height','debutYear','matched')\
+  .select('yearID','POS','master_raw.ID','firstLastCommon','firstLastGiven','weight','height','debutYear','matched')\
   .withColumnRenamed('POS','position')\
   .persist()
 
@@ -363,6 +289,12 @@ train_test_raw.count()
 
 # COMMAND ----------
 
+fielding_gold = spark.table('fielding_gold')
+fielding_gold.printSchema()
+
+# COMMAND ----------
+
+master_gold = spark.table('fielding_gold')
 fielding_gold.printSchema()
 
 # COMMAND ----------
@@ -388,14 +320,15 @@ display(train_test_enriched.orderBy('weight',ascending=False))
 
 # COMMAND ----------
 
-train_test_enriched.write.format("delta").save("dbfs:/home/tim.lortz@databricks.com/identities/train_test_enriched")
+train_test_enriched.write.format("delta").save(db_root_path + "train_test_enriched")
 
 # COMMAND ----------
 
-# MAGIC %sql 
-# MAGIC CREATE TABLE train_test_enriched
-# MAGIC USING DELTA
-# MAGIC LOCATION "dbfs:/home/tim.lortz@databricks.com/identities/train_test_enriched"
+spark.sql("""
+CREATE TABLE IF NOT EXISTS train_test_enriched
+USING DELTA
+LOCATION {}
+""".format(db_root_path + "train_test_enriched"))
 
 # COMMAND ----------
 
@@ -412,12 +345,7 @@ train_test_enriched.createOrReplaceTempView("train_test_enriched")
 
 # COMMAND ----------
 
-# MAGIC %sql 
-# MAGIC use tim_lortz_databricks_com_identities
-
-# COMMAND ----------
-
-# MAGIC %sql DROP TABLE matches
+spark.sql("use {}".format(get_metastore_username_prefix() + "_identities"))
 
 # COMMAND ----------
 
@@ -425,14 +353,15 @@ train_test_enriched.createOrReplaceTempView("train_test_enriched")
 
 # COMMAND ----------
 
-# MAGIC %sql 
-# MAGIC CREATE TABLE IF NOT EXISTS matches (
-# MAGIC   id_master STRING,
-# MAGIC   id_transaction STRING,
-# MAGIC   date_created TIMESTAMP,
-# MAGIC   added_by STRING)
-# MAGIC USING DELTA
-# MAGIC LOCATION 'dbfs:/home/tim.lortz@databricks.com/identities/matches'
+spark.sql("""
+CREATE TABLE IF NOT EXISTS matches (
+  id_master STRING,
+  id_transaction STRING,
+  date_created TIMESTAMP,
+  added_by STRING)
+USING DELTA
+LOCATION \'{}\'
+""".format(get_user_home_folder_path() + 'identities/matches'))
 
 # COMMAND ----------
 
@@ -442,7 +371,7 @@ train_test_enriched.createOrReplaceTempView("train_test_enriched")
 
 # MAGIC %sql 
 # MAGIC CREATE OR REPLACE VIEW matches_platinum AS
-# MAGIC SELECT master_gold.firstLastGiven as GivenName,
+# MAGIC SELECT DISTINCT master_gold.firstLastGiven as GivenName,
 # MAGIC       fielding_gold.firstLastCommon as Name,
 # MAGIC       master_gold.debutYear as DebutYear,
 # MAGIC       fielding_gold.yearID as Year,
@@ -453,3 +382,7 @@ train_test_enriched.createOrReplaceTempView("train_test_enriched")
 # MAGIC FROM matches 
 # MAGIC INNER JOIN master_gold ON master_gold.ID = matches.id_master
 # MAGIC INNER JOIN fielding_gold ON fielding_gold.ID = matches.id_transaction;
+
+# COMMAND ----------
+
+# MAGIC %sql select * from matches_platinum limit 5

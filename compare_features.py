@@ -1,9 +1,5 @@
 # Databricks notebook source
 from pyspark.sql import functions as F
-from pyspark.ml.feature import OneHotEncoderEstimator, StringIndexer, VectorAssembler, CountVectorizerModel, Tokenizer, NGram
-from pyspark.ml.pipeline import Pipeline
-from pyspark.sql.types import IntegerType
-
 from fuzzywuzzy import fuzz
 from sklearn.metrics.pairwise import cosine_similarity 
 from Levenshtein import jaro_winkler
@@ -43,22 +39,22 @@ class string_feature_comparison():
         for metric in self.comparison_mapping[output_base]['metrics']:
           if metric == 'all':
             df = df.withColumn(output_base+self.suffixes['ts'],udf_token_set_score(F.col(self.comparison_mapping[output_base]['inputCols'][0]),\
-                                                                              F.col(self.comparison_mapping[output_base]['inputCols'][1])))\
+                                                                              F.col(self.comparison_mapping[output_base]['inputCols'][1])).cast("double"))\
               .withColumn(output_base+self.suffixes['jw'],udf_jaro_winkler(F.col(self.comparison_mapping[output_base]['inputCols'][0]),\
-                                                                              F.col(self.comparison_mapping[output_base]['inputCols'][1])))
+                                                                              F.col(self.comparison_mapping[output_base]['inputCols'][1])).cast("double"))
           elif metric == 'ts': #token set ratio
             df = df.withColumn(output_base+self.suffixes['ts'],udf_token_set_score(F.col(self.comparison_mapping[output_base]['inputCols'][0]),\
-                                                                              F.col(self.comparison_mapping[output_base]['inputCols'][1])))
+                                                                              F.col(self.comparison_mapping[output_base]['inputCols'][1])).cast("double"))
           elif metric == 'jw': # jaro-winkler
             df = df.withColumn(output_base+self.suffixes['jw'],udf_jaro_winkler(F.col(self.comparison_mapping[output_base]['inputCols'][0]),\
-                                                                              F.col(self.comparison_mapping[output_base]['inputCols'][1])))
+                                                                              F.col(self.comparison_mapping[output_base]['inputCols'][1])).cast("double"))
           else:
             print("Metric must be a list containing one or more of 'ts', 'jw', 'all'")
       elif self.comparison_mapping[output_base]['featureType'] == 'vector':
         for metric in self.comparison_mapping[output_base]['metrics']:
           if metric == 'cs': #cosine similarity
             df = df.withColumn(output_base+self.suffixes['cs'],udf_cos_sim(F.col(self.comparison_mapping[output_base]['inputCols'][0]),\
-                                                                                F.col(self.comparison_mapping[output_base]['inputCols'][1])))
+                                                                                F.col(self.comparison_mapping[output_base]['inputCols'][1])).cast("double"))
           else:
             print("Metric must be a list containing one or more of 'cs', ...")
     return df

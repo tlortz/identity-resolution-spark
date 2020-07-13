@@ -32,11 +32,16 @@ dbutils.widgets.dropdown('Activate Search',"No",["No","Yes"])
 
 # COMMAND ----------
 
-# MAGIC %sql use tim_lortz_databricks_com_identities
+# MAGIC %run "/All Shared/Helpers/python_tags"
 
 # COMMAND ----------
 
-transactions = spark.table("fielding_gold").persist()
+spark.sql("use {}".format(get_metastore_username_prefix()+"_identities"))
+
+# COMMAND ----------
+
+# transactions = spark.table("fielding_gold").persist()
+transactions = spark.sql("SELECT * FROM fielding_gold TIMESTAMP AS OF \'2020-05-01T00:00:00Z\'").persist()
 
 # COMMAND ----------
 
@@ -45,16 +50,17 @@ transactions = spark.table("fielding_gold").persist()
 # COMMAND ----------
 
 display(
-spark.sql("""SELECT ID, firstLastCommon, yearID, position FROM fielding_gold 
+spark.sql("""SELECT ID, firstLastCommon, yearID, position FROM fielding_gold TIMESTAMP AS OF \'2020-05-01T00:00:00Z\'
 WHERE firstLastCommon == \'{}\' ORDER BY yearID, position""".format(dbutils.widgets.get('Player Name'))))
 
 # COMMAND ----------
 
-master = spark.table("master_gold").persist()
+# master = spark.table("master_gold").persist()
+master = spark.sql("SELECT * FROM master_gold TIMESTAMP AS OF \'2020-05-01T00:00:00Z\'").persist()
 
 # COMMAND ----------
 
-model_path = "dbfs:/home/tim.lortz@databricks.com/identities/gbtModel"
+model_path = get_user_home_folder_path() + "identities/gbtModel"
 model = GBTClassificationModel.load(model_path)
 
 # COMMAND ----------
@@ -72,7 +78,7 @@ master.count()
 #     inputCols=inputCols,
 #     outputCol="features")
 # feature_pipeline = Pipeline(stages=[indexer,encoder,assembler])
-feature_pipeline = PipelineModel.load("dbfs:/home/tim.lortz@databricks.com/identities/feature_pipeline")
+feature_pipeline = PipelineModel.load(get_user_home_folder_path() + "identities/feature_pipeline")
 
 # COMMAND ----------
 
@@ -174,10 +180,10 @@ master_hashed.count()
 
 # COMMAND ----------
 
-sample_df = transactions\
-  .filter(F.col('firstLastCommon')==F.lit(dbutils.widgets.get("Player Name")))\
-  .filter(F.col('yearID')==F.lit(dbutils.widgets.get("Year playing")))\
-  .filter(F.col('position')==F.lit(dbutils.widgets.get("Position")))
+# sample_df = transactions\
+#   .filter(F.col('firstLastCommon')==F.lit(dbutils.widgets.get("Player Name")))\
+#   .filter(F.col('yearID')==F.lit(dbutils.widgets.get("Year playing")))\
+#   .filter(F.col('position')==F.lit(dbutils.widgets.get("Position")))
 
 # COMMAND ----------
 

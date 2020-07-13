@@ -25,8 +25,10 @@ from delta.tables import *
 
 # COMMAND ----------
 
-# MAGIC %sql
-# MAGIC use tim_lortz_databricks_com_identities
+# %sql
+# use tim_lortz_databricks_com_identities
+spark.sql("use {}".format(get_metastore_username_prefix() + "_identities"))
+display(spark.sql("show tables"))
 
 # COMMAND ----------
 
@@ -51,7 +53,7 @@ transaction_ids = set(spark.table('fielding_gold').select('ID').toPandas().ID.to
 # COMMAND ----------
 
 display(
-spark.sql("""SELECT ID, playerID, firstLastGiven, height, weight, debutYear FROM master_gold
+spark.sql("""SELECT ID, playerID, firstLastGiven, height, weight, debutYear FROM master_gold TIMESTAMP AS OF \'2020-05-01T00:00:00Z\'
 WHERE firstLastGiven == \'{}\'""".format(dbutils.widgets.get('Given Name'))))
 
 # COMMAND ----------
@@ -61,7 +63,7 @@ WHERE firstLastGiven == \'{}\'""".format(dbutils.widgets.get('Given Name'))))
 # COMMAND ----------
 
 display(
-spark.sql("""SELECT ID, firstLastCommon, yearID, position FROM fielding_gold
+spark.sql("""SELECT ID, firstLastCommon, yearID, position FROM fielding_gold TIMESTAMP AS OF \'2020-05-01T00:00:00Z\'
 WHERE firstLastCommon == \'{}\'""".format(dbutils.widgets.get('Common Name'))))
 
 # COMMAND ----------
@@ -77,7 +79,7 @@ new_record = spark.createDataFrame(pd.DataFrame({'id_master':[dbutils.widgets.ge
 if dbutils.widgets.get('Master ID') in master_ids and dbutils.widgets.get('Transaction ID') in transaction_ids and dbutils.widgets.get('Register')=="Yes":
 #   new_record.write.format("delta").mode("append").save("dbfs:/home/tim.lortz@databricks.com/identities/matches")
 # use whenNotMatchedInsert to avoid writing duplicate matches
-  deltaTable = DeltaTable.forPath(spark, "dbfs:/home/tim.lortz@databricks.com/identities/matches")
+  deltaTable = DeltaTable.forPath(spark, get_user_home_folder_path() + "identities/matches")
   deltaTable.alias("master").merge(
     new_record.alias("updates"),
     "master.id_master = updates.id_master" and "master.id_transaction = updates.id_transaction") \
@@ -112,3 +114,6 @@ display(
 # COMMAND ----------
 
 # MAGIC %sql SELECT * FROM matches
+
+# COMMAND ----------
+
