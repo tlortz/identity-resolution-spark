@@ -15,7 +15,11 @@ sparknlp.start()
 
 # COMMAND ----------
 
-# MAGIC %run "/All Shared/Helpers/python_tags"
+#%run "/All Shared/Helpers/python_tags"
+
+# COMMAND ----------
+
+# MAGIC %run "./python_tags"
 
 # COMMAND ----------
 

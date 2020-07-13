@@ -15,12 +15,24 @@ from pyspark.sql import functions as F
 
 # COMMAND ----------
 
-# MAGIC %run "/All Shared/Helpers/python_tags"
+#%run "/All Shared/Helpers/python_tags"
+
+# COMMAND ----------
+
+# MAGIC %run "../python_tags"
 
 # COMMAND ----------
 
 db_root_path = get_user_home_folder_path() + 'identities/'
 db_name = get_metastore_username_prefix() + '_identities'
+
+# COMMAND ----------
+
+db_root_path
+
+# COMMAND ----------
+
+db_name
 
 # COMMAND ----------
 
@@ -148,21 +160,6 @@ master_gold.count()
 # COMMAND ----------
 
 display(master_gold)
-
-# COMMAND ----------
-
-# MAGIC %md __Next steps__:
-# MAGIC - Review Luke's work and avoid duplication
-# MAGIC - Replace the existing tables with new schema
-# MAGIC - Build a class to automate comparisons between two cross-joined dataframes (e.g. a config dict to compare columns pairwise and return a cosine similarity score)
-# MAGIC   - Call that class in the model training and search notebooks
-# MAGIC - Re-train the model on a dataset that has pairs intentionally chosen closer together in time
-# MAGIC - Evaluate the new model and look again at feature importances
-# MAGIC - Overhaul the notebooks to use only the new methods - make them very clean
-# MAGIC - Create a new repo in my GitHub
-# MAGIC - Clone it locally
-# MAGIC - Download workspace into the local clone, commit changes
-# MAGIC - Make sure that all notebooks leverage %run "/All Shared/Helpers/python_tags" correctly, with paths and names built off the tags
 
 # COMMAND ----------
 
@@ -294,22 +291,19 @@ fielding_gold.printSchema()
 
 # COMMAND ----------
 
-master_gold = spark.table('fielding_gold')
-fielding_gold.printSchema()
+master_gold = spark.table('master_gold')
+master_gold.printSchema()
 
 # COMMAND ----------
 
 train_test_enriched = train_test_raw\
-  .join(master_gold.select('ID','embedding','firstLastGiven_nGram_frequencies'),train_test_raw.ID == master_gold.ID,"inner")\
-  .withColumnRenamed('embedding','firstLastGiven_embedding')\
+  .join(master_gold.select('ID','firstLastGiven_bert_embedding','firstLastGiven_bigram_frequencies'),train_test_raw.ID == master_gold.ID,"inner")\
   .drop(master_gold.ID)\
-  .join(fielding_gold,\
+  .join(fielding_gold.drop('ID'),\
         (train_test_raw.firstLastCommon == fielding_gold.firstLastCommon) & \
         (train_test_raw.yearID == fielding_gold.yearID) & \
         (train_test_raw.position == fielding_gold.position),\
        "inner")\
-  .withColumnRenamed("embedding",'firstLastCommon_embedding')\
-  .drop(fielding_gold.ID)\
   .drop(fielding_gold.firstLastCommon)\
   .drop(fielding_gold.yearID)\
   .drop(fielding_gold.position)
@@ -327,7 +321,7 @@ train_test_enriched.write.format("delta").save(db_root_path + "train_test_enrich
 spark.sql("""
 CREATE TABLE IF NOT EXISTS train_test_enriched
 USING DELTA
-LOCATION {}
+LOCATION \'{}\'
 """.format(db_root_path + "train_test_enriched"))
 
 # COMMAND ----------
