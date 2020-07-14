@@ -229,7 +229,7 @@ LOCATION \'{}\'""".format(db_root_path+"fielding_gold/"))
 
 # COMMAND ----------
 
-matched_names = spark.table("name_lookup").select("firstLastCommon","firstLastGiven").sample(.25,seed=42)
+matched_names = spark.table("name_lookup").select("firstLastCommon","firstLastGiven").sample(.5,seed=42)
 
 # COMMAND ----------
 
@@ -266,12 +266,29 @@ pairs_raw.count()
 
 # COMMAND ----------
 
+# MAGIC %md Set a knob for how much imbalance (matched/unmatched) in the training set we want to tolerate. It was initially set to be evenly balanced, but that did not give a sufficiently tight boundary because the non-matched samples were so different from each other, whereas the matched samples were so similar to each other
+
+# COMMAND ----------
+
+# let's try a 10:1 ratio
+unmatched_matched_ratio = 10
+
+# COMMAND ----------
+
 matched_set = pairs_raw.filter(F.col("matched"))
 matched_count = matched_set.count()
 total_count = pairs_raw.count()
 unmatched_count = total_count - matched_count
-balance_sample_ratio = matched_count / unmatched_count
+balance_sample_ratio = matched_count*unmatched_matched_ratio / unmatched_count
 unmatched_set = pairs_raw.filter(~ F.col("matched")).sample(False, balance_sample_ratio, 42)
+
+# COMMAND ----------
+
+matched_set.count()
+
+# COMMAND ----------
+
+unmatched_set.count()
 
 # COMMAND ----------
 

@@ -21,12 +21,14 @@ from delta.tables import *
 
 # COMMAND ----------
 
-# MAGIC %run "/All Shared/Helpers/python_tags"
+#%run "/All Shared/Helpers/python_tags"
 
 # COMMAND ----------
 
-# %sql
-# use tim_lortz_databricks_com_identities
+# MAGIC %run "../python_tags"
+
+# COMMAND ----------
+
 spark.sql("use {}".format(get_metastore_username_prefix() + "_identities"))
 display(spark.sql("show tables"))
 
@@ -53,7 +55,7 @@ transaction_ids = set(spark.table('fielding_gold').select('ID').toPandas().ID.to
 # COMMAND ----------
 
 display(
-spark.sql("""SELECT ID, playerID, firstLastGiven, height, weight, debutYear FROM master_gold TIMESTAMP AS OF \'2020-05-01T00:00:00Z\'
+spark.sql("""SELECT ID, playerID, firstLastGiven, height, weight, debutYear FROM master_gold
 WHERE firstLastGiven == \'{}\'""".format(dbutils.widgets.get('Given Name'))))
 
 # COMMAND ----------
@@ -63,7 +65,7 @@ WHERE firstLastGiven == \'{}\'""".format(dbutils.widgets.get('Given Name'))))
 # COMMAND ----------
 
 display(
-spark.sql("""SELECT ID, firstLastCommon, yearID, position FROM fielding_gold TIMESTAMP AS OF \'2020-05-01T00:00:00Z\'
+spark.sql("""SELECT ID, firstLastCommon, yearID, position FROM fielding_gold
 WHERE firstLastCommon == \'{}\'""".format(dbutils.widgets.get('Common Name'))))
 
 # COMMAND ----------
@@ -114,6 +116,3 @@ display(
 # COMMAND ----------
 
 # MAGIC %sql SELECT * FROM matches
-
-# COMMAND ----------
-

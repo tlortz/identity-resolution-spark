@@ -16,7 +16,31 @@
 
 # COMMAND ----------
 
-train_test_raw = spark.table("train_test_raw")
+from pyspark.sql import functions as F
+
+# COMMAND ----------
+
+# MAGIC %md ### Data loading
+
+# COMMAND ----------
+
+#%run "/All Shared/Helpers/python_tags"
+
+# COMMAND ----------
+
+# MAGIC %run "../python_tags"
+
+# COMMAND ----------
+
+spark.sql("USE {}".format(get_metastore_username_prefix()+"_identities"))
+
+# COMMAND ----------
+
+# MAGIC %sql SHOW TABLES
+
+# COMMAND ----------
+
+train_test_raw = spark.table("train_test_enriched").repartition(32).persist()
 
 # COMMAND ----------
 
@@ -24,19 +48,15 @@ display(train_test_raw)
 
 # COMMAND ----------
 
-# MAGIC %md There are some null values in the `weight` and `height` fields. These will cause errors downstream if we don't rectify them now
+# MAGIC %md Force all the data to be cached prior to doing expensive UDFs for string comparisons - improve parallelization
 
 # COMMAND ----------
 
-print("{0} original records, of which {1} do not have nulls".format(train_test_raw.count(),train_test_raw.na.drop().count()))
+display(train_test_raw.groupBy('firstLastCommon').count())
 
 # COMMAND ----------
 
-# MAGIC %md Since it's a relatively small number - less than 5%, we'll just drop any rows with nulls
-
-# COMMAND ----------
-
-# MAGIC %md #### Feature Engineering
+# MAGIC %md ### Feature Engineering
 # MAGIC 
 # MAGIC Two main flavors of feature engineering to do:
 # MAGIC 1. numeric comparisons between fields (year differences between `yearID` and `debutYear`, string similarity between `firstLastGiven` and `firstLastCommon`)
@@ -44,187 +64,104 @@ print("{0} original records, of which {1} do not have nulls".format(train_test_r
 
 # COMMAND ----------
 
-from pyspark.sql import functions as F
-from pyspark.ml.feature import OneHotEncoderEstimator, StringIndexer, VectorAssembler, CountVectorizerModel, Tokenizer, NGram
+# MAGIC %run ../compare_features
+
+# COMMAND ----------
+
+comparison_mapping = {'name_string':{'featureType':'string','inputCols':['firstLastCommon','firstLastGiven'],'metrics':['all']},
+                      'name_bigram':{'featureType':'vector','inputCols':['firstLastCommon_bigram_frequencies','firstLastGiven_bigram_frequencies'],'metrics':['cs']},
+                      'name_embedding':{'featureType':'vector','inputCols':['firstLastCommon_bert_embedding','firstLastGiven_bert_embedding'],'metrics':['cs']}}
+feature_comparison = string_feature_comparison(comparison_mapping)
+
+# COMMAND ----------
+
+train_test_comparisons = feature_comparison.transform(train_test_raw).persist()
+
+# COMMAND ----------
+
+display(train_test_comparisons)
+
+# COMMAND ----------
+
+display(train_test_comparisons.groupBy('matched').count())
+
+# COMMAND ----------
+
+# MAGIC %md Since these comparisons took so long to compute, we'll save them off for re-use after the current session
+
+# COMMAND ----------
+
+# MAGIC %sql DROP TABLE train_test_comparisons
+
+# COMMAND ----------
+
+dbutils.fs.rm(get_user_home_folder_path()+"identities/train_test_comparisons",True)
+
+# COMMAND ----------
+
+dbutils.fs.ls(get_user_home_folder_path()+"identities/")
+
+# COMMAND ----------
+
+train_test_comparisons.write.partitionBy("matched").format("delta").save(get_user_home_folder_path()+"identities/train_test_comparisons")
+
+# COMMAND ----------
+
+spark.sql("""
+CREATE TABLE IF NOT EXISTS train_test_comparisons
+USING DELTA
+LOCATION \'{}\'""".format(get_user_home_folder_path()+"identities/train_test_comparisons"))
+
+# COMMAND ----------
+
+# MAGIC %sql select * from train_test_comparisons limit 5
+
+# COMMAND ----------
+
+# MAGIC %md #### Package up the standard feature transformations (e.g. indexer, vector assemblers in a pipeline)
+
+# COMMAND ----------
+
+train_test_comparisons = spark.table('train_test_comparisons')\
+  .withColumn('year_diff',F.col('yearID')-F.col('debutYear'))\
+  .withColumn('matched',F.col('matched').cast('integer'))\
+  .persist()
+display(train_test_comparisons)
+
+# COMMAND ----------
+
+# MAGIC %md Add in string indexer for player fielding position
+
+# COMMAND ----------
+
+from pyspark.ml.feature import StringIndexer, OneHotEncoderEstimator, VectorAssembler
 from pyspark.ml.pipeline import Pipeline
-from pyspark.sql.types import IntegerType
+indexer = StringIndexer(inputCol="position", outputCol="position_index",handleInvalid="keep")
+label_indexer = StringIndexer(inputCol="matched", outputCol="label",handleInvalid="keep")
+encoder = OneHotEncoderEstimator(inputCols=["position_index"], outputCols=["position_categories"])
+feature_cols = ['weight','height','year_diff','position_categories','name_string_token_set_ratio','name_string_jaro_winkler_similarity','name_bigram_cosine_similarity','name_embedding_cosine_similarity']
+assembler = VectorAssembler(inputCols=feature_cols,outputCol='features')
+feature_pipeline = Pipeline(stages=[indexer,label_indexer,encoder,assembler]).fit(train_test_comparisons)
 
 # COMMAND ----------
 
-# MAGIC %md Name comparison metric 1: [token set ratio](https://github.com/seatgeek/fuzzywuzzy#token-set-ratio) (word similarity)
+train_test = feature_pipeline.transform(train_test_comparisons).persist()
 
 # COMMAND ----------
 
-from fuzzywuzzy import fuzz
-udf_token_set_score = F.udf(lambda x,y: float(fuzz.token_set_ratio(x,y)/100))
+display(train_test.orderBy('ID').drop('firstLastGiven_bert_embedding','firstLastGiven_bigram_frequencies','firstLastCommon_bert_embedding','firstLastCommon_bigram_frequencies'))
 
 # COMMAND ----------
 
-# MAGIC %md Name comparison metric 2: cosine similarity (character similarity)
+# dbutils.fs.rm(get_user_home_folder_path()+"identities/feature_pipeline",True)
 
 # COMMAND ----------
 
-# in order to have consistent vectors for distance comparison, create a universal vocabulary rather than inferring an independent one for each column
-import string
-letters = [l for l in list(string.ascii_lowercase)]
-numbers=[str(d) for d in range(10)]
-vocab = letters + numbers
-
-def create_letter_counts(df,input_col):
-  new_df = df.withColumn(input_col+"_vec",F.split(F.lower(F.col(input_col)),""))
-  cv = CountVectorizerModel.from_vocabulary(vocab,inputCol=input_col+"_vec", outputCol=input_col+"_features")
-  return cv.transform(new_df).drop(input_col+"_vec")
+feature_pipeline.save(get_user_home_folder_path()+"identities/feature_pipeline")
 
 # COMMAND ----------
 
-import itertools
-vocab_2gram = [e[0]+e[1]+e[2] for e in itertools.product(*[vocab, [" "], vocab])]
-def create_ngram_counts(df,input_col):
-  ngram = NGram(n=2, inputCol=input_col+"_chars", outputCol=input_col+"_nGrams")
-  new_df = ngram.transform(df.withColumn(input_col+"_chars",F.split(F.lower(F.col(input_col)),"")))
-  cv = CountVectorizerModel.from_vocabulary(vocab_2gram,inputCol=input_col+"_nGrams", outputCol=input_col+"_features")
-  return cv.transform(new_df).drop(input_col+"_nGrams",input_col+"_chars")
-
-# COMMAND ----------
-
-# MAGIC %md And the custom distance metric for cosine similarity
-
-# COMMAND ----------
-
-from sklearn.metrics.pairwise import cosine_similarity 
-udf_cos_sim = F.udf(lambda x,y: float(cosine_similarity([x,y])[0][1]))
-
-# COMMAND ----------
-
-# MAGIC %md Wrap the cosine similarity transformations & computations in a single function
-
-# COMMAND ----------
-
-def add_cosine_similarity(df,nameCol1,nameCol2):
-#   df1 = create_letter_counts(df,nameCol1)
-  df1 = create_ngram_counts(df,nameCol1)
-#   df2 = create_letter_counts(df1,nameCol2)
-  df2 = create_ngram_counts(df1,nameCol2)
-  results = df2.withColumn('cos_sim',udf_cos_sim(F.col(nameCol1+"_features"),F.col(nameCol2+"_features")).cast("double"))\
-    .drop(nameCol1+"_features",nameCol2+"_features")
-  return results
-
-# COMMAND ----------
-
-train_test_featured = train_test_raw\
-  .na.drop()\
-  .withColumn('year_dist',(F.col('yearID')-F.col('debutYear'))/F.lit(150))\
-  .withColumn('token_set_sim',udf_token_set_score(F.col('firstLastGiven'),F.col('firstLastCommon')).cast("double"))\
-  .withColumn('label',F.col('matched').cast(IntegerType()))\
-  .drop('ID')
-
-train_test_featured = add_cosine_similarity(train_test_featured,"firstLastGiven","firstLastCommon")
-
-# COMMAND ----------
-
-display(train_test_featured)
-
-# COMMAND ----------
-
-# MAGIC %md __Can we leverage BERT embeddings from spark-nlp to get more context from names?__
-
-# COMMAND ----------
-
-# MAGIC %md Following [JSL tutorial](https://towardsdatascience.com/text-classification-in-spark-nlp-with-bert-and-universal-sentence-encoders-e644d618ca32)
-
-# COMMAND ----------
-
-import sparknlp
-sparknlp.start()
-
-# COMMAND ----------
-
-from sparknlp.base import *
-from sparknlp.annotator import *
-import pandas as pd
-print("Spark NLP version", sparknlp.version())
-print("Apache Spark version:", spark.version)
-
-# COMMAND ----------
-
-ner_bert = NerDLModel.pretrained('ner_dl_bert')\
-  .setInputCols(['document','token'])\
-  .setOutputCols('embeddings')
-
-# COMMAND ----------
-
-glove_embeddings = WordEmbeddingsModel.pretrained('glove_100d')\
-  .setInputCols(['document','token'])\
-  .setOutputCols('embeddings')
-
-# COMMAND ----------
-
-
-
-# COMMAND ----------
-
-document = DocumentAssembler()\
-    .setInputCol("firstLastGiven")\
-    .setOutputCol("document")
-    
-# we can also use sentence detector here 
-# if we want to train on and get predictions for each sentence# downloading pretrained embeddings
-use = UniversalSentenceEncoder.pretrained()\
- .setInputCols(["document"])\
- .setOutputCol("sentence_embeddings")# the classes/labels/categories are in category columnclasssifierdl = ClassifierDLApproach()\
-  .setInputCols(["sentence_embeddings"])\
-  .setOutputCol("class")\
-  .setLabelColumn("category")\
-  .setMaxEpochs(5)\
-  .setEnableOutputLogs(True)use_clf_pipeline = Pipeline(
-    stages = [
-        document,
-        use,
-        classsifierdl
-    ])
-
-# COMMAND ----------
-
-# MAGIC %md Resume original workflow...
-
-# COMMAND ----------
-
-indexer = StringIndexer(inputCol="POS", outputCol="POSIndex",handleInvalid="keep")
-train_test_indexed = indexer.fit(train_test_featured).transform(train_test_featured)
-
-# COMMAND ----------
-
-encoder = OneHotEncoderEstimator(inputCols=["POSIndex"], outputCols=["POSCategories"])
-train_test_encoded = encoder.fit(train_test_indexed).transform(train_test_indexed)
-
-# COMMAND ----------
-
-display(train_test_encoded)
-
-# COMMAND ----------
-
-inputCols=["year_dist", "token_set_sim", "cos_sim", "POSCategories","weight","height"]
-
-assembler = VectorAssembler(
-    inputCols=inputCols,
-    outputCol="features")
-
-# train_test_staged = assembler.transform(train_test_indexed)
-train_test_staged = assembler.transform(train_test_encoded).persist()
-
-# COMMAND ----------
-
-# MAGIC %md Put all the transformations into a pipeline
-
-# COMMAND ----------
-
-from pyspark.ml import Pipeline
-
-feature_pipeline = Pipeline(stages=[indexer,encoder,assembler]).fit(train_test_featured)
-
-# COMMAND ----------
-
-(train,test) = train_test_staged.randomSplit([0.7, 0.3],seed=42)
+(train,test) = train_test.randomSplit([0.7, 0.3],seed=42)
 
 # COMMAND ----------
 
@@ -238,184 +175,65 @@ train.count()
 
 # MAGIC %md ### Create a model and evaluate accuracy
 # MAGIC 
+# MAGIC __Also, use `MLflow` to track models__
+# MAGIC 
 # MAGIC For simplicity and robustness, let's start with a GBT model (xgboost might be a good follow-on activity)
 
 # COMMAND ----------
 
+import mlflow
+from mlflow import spark as mlflow_spark
+import tempfile
 from pyspark.ml.classification import GBTClassifier
 from pyspark.ml.evaluation import BinaryClassificationEvaluator
-
-# COMMAND ----------
-
-gbt = GBTClassifier(labelCol="label", featuresCol="features", maxIter=10)
-
-# COMMAND ----------
-
-model_gbt = gbt.fit(train)
-
-# COMMAND ----------
-
-train_fitted = model_gbt.transform(train)
-
-# COMMAND ----------
-
-evaluator = BinaryClassificationEvaluator()
-
-# COMMAND ----------
-
-evaluator.evaluate(train_fitted)
-
-# COMMAND ----------
-
-model_gbt.featureImportances
-
-# COMMAND ----------
-
-# MAGIC %md Let's also look at test set accuracy
-
-# COMMAND ----------
-
-test_fitted = model_gbt.transform(test)
-
-# COMMAND ----------
-
-evaluator.evaluate(test_fitted)
-
-# COMMAND ----------
-
-display(test_fitted)
-
-# COMMAND ----------
-
-from pyspark.sql.types import *
 from pyspark.ml.linalg import DenseVector
+import pandas as pd
+
+# COMMAND ----------
+
+# MAGIC %md Package up all the steps needed to get a readable table of feature importance values from a fitted `pyspark.ml` GBT model
+
+# COMMAND ----------
 
 def sparse_to_array(v):
   v = DenseVector(v)
   new_array = list([float(x) for x in v])
   return new_array
 
-sparse_to_array_udf = F.udf(sparse_to_array, ArrayType(DoubleType()))
+def clean_label_feature_importances(fitted_model,training_df):
+  importance_list = sparse_to_array(fitted_model.featureImportances)
+  importance_df = pd.DataFrame({'importance':importance_list}).reset_index()
+  numeric_metadata = training_df.select("features").schema[0].metadata.get('ml_attr').get('attrs').get('numeric')
+  binary_metadata = training_df.select("features").schema[0].metadata.get('ml_attr').get('attrs').get('binary')
+  merge_list = numeric_metadata + binary_metadata
+  feature_df = pd.DataFrame(merge_list)
+  return pd.merge(feature_df,importance_df,left_on='idx',right_on='index').drop('idx',axis=1)
 
 # COMMAND ----------
 
-display(test_fitted.withColumn('prob_match',sparse_to_array_udf(F.col('probability'))[1]))
-
-# COMMAND ----------
-
-# MAGIC %md #### Try with xgboost instead - the gbt model is relying almost exclusively on token set scores
-
-# COMMAND ----------
-
-train.createOrReplaceTempView("train")
-test.createOrReplaceTempView("test")
-
-# COMMAND ----------
-
-# MAGIC %scala
-# MAGIC val train = spark.table("train")
-# MAGIC val test = spark.table("test")
-
-# COMMAND ----------
-
-# MAGIC %scala
-# MAGIC val xgbParam = Map("eta" -> 0.1f,
-# MAGIC       "max_depth" -> 3,
-# MAGIC       "num_class" -> 2,
-# MAGIC       "num_round" -> 100,
-# MAGIC       "num_workers" -> 8)
-
-# COMMAND ----------
-
-# MAGIC %scala
-# MAGIC import ml.dmlc.xgboost4j.scala.spark.{XGBoostClassificationModel,XGBoostClassifier}
-# MAGIC val xgbClassifier = new XGBoostClassifier(xgbParam).setFeaturesCol("features").setLabelCol("label")
-# MAGIC val model_xgb = xgbClassifier.fit(train)
-
-# COMMAND ----------
-
-# MAGIC %scala
-# MAGIC import org.apache.spark.ml.evaluation.BinaryClassificationEvaluator
-# MAGIC 
-# MAGIC val evaluator = new BinaryClassificationEvaluator()
-
-# COMMAND ----------
-
-# MAGIC %scala
-# MAGIC evaluator.evaluate(model_xgb.transform(train))
-
-# COMMAND ----------
-
-# MAGIC %md ### Match new "transactions" with "master" identities
-
-# COMMAND ----------
-
-masterDF = spark.table('master_silver')
-display(masterDF)
-
-# COMMAND ----------
-
-trxDF = spark.table('fielding_silver')
-display(trxDF)
-
-# COMMAND ----------
-
-def merge_inference_filter(sampleDF,threshold=0.9):
-  # cross join the tables
-  joined = masterDF.crossJoin(F.broadcast(sampleDF))
-  # add the features 
-  joined_featured = feature_pipeline.transform(
-    add_cosine_similarity(
-      joined\
-        .na.drop()\
-        .withColumn('year_dist',(F.col('yearID')-F.col('debutYear'))/F.lit(150))\
-        .withColumn('token_set_sim',udf_token_set_score(F.col('firstLastGiven'),F.col('firstLastCommon')).cast("double"))\
-        .drop('ID'),\
-      "firstLastGiven","firstLastCommon"
-    )
-  )
-  
-  # run the model
-  joined_fitted = model_gbt.transform(joined_featured)
-  # filter down results to those above the min probability
-  # select just the key fields
-  # sort by the sample_df entries and master IDs by descending probability
-  final_results = joined_fitted\
-    .withColumn('prob_match',sparse_to_array_udf(F.col('probability'))[1])\
-    .filter(F.col('prob_match') >= F.lit(threshold))\
-    .select('firstLastGiven','height','weight','debutYear','firstLastCommon','yearID','POS','year_dist','token_set_sim','cos_sim','prediction','prob_match')\
-    .orderBy('firstLastCommon','prob_match',ascending=False)
-  return final_results
-
-# COMMAND ----------
-
-import pandas as pd
-sample_pd = pd.DataFrame({'firstLastCommon':['Gerrit Cole','Derek Jeter','Bo Jackson','Babe Ruth','Babe Ruth','Ty Cobb'],'yearID':[2018,2001,1987,1927,1918,1905],'POS':['P','SS','OF','RF','P','OF']})
-sample_pd.head
-
-# COMMAND ----------
-
-import pandas as pd
-sample_pd = pd.DataFrame({'firstLastCommon':['Max Scherzer','Jason Varitek'],'yearID':[2018,2001],'POS':['P','C']})
-sample_pd.head
-
-# COMMAND ----------
-
-results = merge_inference_filter(spark.createDataFrame(sample_pd),threshold=0.9)
-
-# COMMAND ----------
-
-display(results)
-
-# COMMAND ----------
-
-# MAGIC %md __Next steps:__
-# MAGIC 
-# MAGIC - feature importances - do POS, height, weight even matter?
-# MAGIC - explore other name comparison metrics, e.g. BERT embeddings
-# MAGIC - explore other models, e.g. xgboost or even DNN
-# MAGIC - once the model is reliable, package it up along with all the upstream transformations in MLflow
-# MAGIC - create a process to link transaction IDs to master IDs if either
-# MAGIC   - the match probability exceeds a (carefully designed) threshold
-# MAGIC   - an adjudicator approves the match
-# MAGIC - expose the master IDs with all transactions in a person-centric reporting tool, a linked graph, etc.
+with mlflow.start_run():
+  gbt = GBTClassifier(labelCol="label", featuresCol="features", maxIter=20)
+  evaluator = BinaryClassificationEvaluator()
+  model = gbt.fit(train)
+  train_predictions = model.transform(train)
+  test_predictions = model.transform(test)
+  train_accuracy = evaluator.evaluate(train_predictions)
+  test_accuracy = evaluator.evaluate(test_predictions)
+  mlflow.log_param("num_samples",train.count())
+  mlflow.log_param("matches",train.filter(F.col('matched')==F.lit(1)).count())
+  mlflow.log_param("non-matches",train.filter(F.col('matched')==F.lit(0)).count())
+  mlflow.log_param("model_type","GradientBoostedTree")
+  mlflow.log_param("max_iterations",gbt.getMaxIter())
+  mlflow.log_param("max_depth",gbt.getMaxDepth())
+  mlflow.log_metric("train_auc",train_accuracy)
+  mlflow.log_metric("test_auc",test_accuracy)
+  mlflow_spark.log_model(model,"gbt_model")
+  importance = clean_label_feature_importances(model,train)
+  # Log importances using a temporary file
+  temp = tempfile.NamedTemporaryFile(prefix="feature-importance-", suffix=".csv")
+  temp_name = temp.name
+  try:
+    importance.to_csv(temp_name, index=False)
+    mlflow.log_artifact(temp_name, "feature-importance.csv")
+  finally:
+    temp.close() # Delete the temp file

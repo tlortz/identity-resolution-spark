@@ -3,11 +3,8 @@
 from pyspark.sql import functions as F
 from pyspark.sql.types import *
 from pyspark.ml.linalg import DenseVector
-from pyspark.ml.feature import OneHotEncoderEstimator, StringIndexer, VectorAssembler, CountVectorizerModel, Tokenizer, NGram
 from pyspark.ml.pipeline import Pipeline, PipelineModel
 from pyspark.ml.classification import GBTClassificationModel
-from fuzzywuzzy import fuzz
-from sklearn.metrics.pairwise import cosine_similarity 
 
 # COMMAND ----------
 
@@ -44,8 +41,7 @@ spark.sql("use {}".format(get_metastore_username_prefix()+"_identities"))
 
 # COMMAND ----------
 
-# transactions = spark.table("fielding_gold").persist()
-transactions = spark.sql("SELECT * FROM fielding_gold").persist()
+transactions = spark.table("fielding_gold").persist()
 
 # COMMAND ----------
 
@@ -59,8 +55,7 @@ WHERE firstLastCommon == \'{}\' ORDER BY yearID, position""".format(dbutils.widg
 
 # COMMAND ----------
 
-# master = spark.table("master_gold").persist()
-master = spark.sql("SELECT * FROM master_gold").persist()
+master = spark.table("master_gold").persist()
 
 # COMMAND ----------
 
@@ -75,11 +70,10 @@ master.count()
 
 from mlflow.tracking import MlflowClient
 experimentID = 1950292
-runID = 'd22247e59404470880696459957bcb48'
+runID = '8a6650eac16d4df190015f51becbab24'
 
 artifactURL = MlflowClient().get_experiment(experimentID).artifact_location
 modelURL = f"{artifactURL}/{runID}/artifacts/gbt_model/sparkml"
-# model = GBTClassificationModel.load(modelURL)
 model = PipelineModel.load(modelURL)
 
 # COMMAND ----------
@@ -125,10 +119,6 @@ def insert_comparison_features(df):
     df.na.drop()\
       .withColumn('year_diff',F.col('yearID')-F.col('debutYear'))
   )
-#   .withColumn('year_dist',(F.col('yearID')-F.col('debutYear'))/F.lit(150))\
-#   .withColumn('token_set_sim',udf_token_set_score(F.col('firstLastGiven'),F.col('firstLastCommon')).cast("double"))\
-#   .withColumn('nGram_cos_sim',udf_cos_sim(F.col('firstLastGiven_nGram_frequencies'),F.col('firstLastCommon_nGram_frequencies')).cast("double"))\
-#   .withColumn('embedding_cos_sim',udf_cos_sim(F.col('firstLastGiven_embedding'),F.col('firstLastCommon_embedding')).cast("double"))#\
   return new_df
 
 def join_compare_transform_predict():
@@ -138,8 +128,7 @@ def join_compare_transform_predict():
     .filter(F.col('position')==F.lit(dbutils.widgets.get("Position")))
   
   key = sample_df.select('firstLastCommon_bigram_frequencies').toPandas().firstLastCommon_bigram_frequencies[0]
-  master_subset = model_mh.approxNearestNeighbors(master_hashed, key, 100).drop('hashes','distCol')#.drop('distCol')
-#   joined_df = master.crossJoin(F.broadcast(sample_df.withColumnRenamed('ID','trxID')))
+  master_subset = model_mh.approxNearestNeighbors(master_hashed, key, 100).drop('hashes','distCol')
   joined_df = master_subset.crossJoin(F.broadcast(sample_df.withColumnRenamed('ID','trxID')))
   featured_df = insert_comparison_features(joined_df)
   staged_df = feature_pipeline.transform(featured_df)
@@ -156,6 +145,6 @@ if dbutils.widgets.get('Activate Search')=='Yes':
   matches = join_compare_transform_predict()\
     .select('ID','playerID','firstLastGiven','height','weight','debutYear','year_diff','name_string_token_set_ratio','name_string_jaro_winkler_similarity',\
             'name_bigram_cosine_similarity','name_embedding_cosine_similarity','prob_match','prediction')\
-    .filter(F.col('prob_match')>F.lit(0.9))\
+    .filter(F.col('prob_match')>F.lit(0.75))\
     .orderBy('prob_match',ascending=False)
   display(matches)
